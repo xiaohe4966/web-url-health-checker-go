@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>Web URL Health Checker</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 12px;
+      font: 13px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #fafafa; color: #222;
+    }
+    h1 { font-size: 16px; margin: 0 0 12px; }
+    .row { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+    label { white-space: nowrap; }
+    textarea, select, input[type=number] {
+      font: 13px -apple-system, monospace;
+      padding: 6px 8px;
+      border: 1px solid #ccc; border-radius: 4px;
+      background: white;
+    }
+    textarea { width: 600px; height: 60px; resize: vertical; }
+    input[type=number] { width: 70px; }
+    button {
+      font: 13px; padding: 7px 14px; border: none; border-radius: 4px;
+      cursor: pointer; font-weight: 600;
+    }
+    .btn-start { background: #19a974; color: white; }
+    .btn-stop  { background: #d9534f; color: white; }
+    .btn-stop:disabled, .btn-start:disabled { opacity: .5; cursor: not-allowed; }
+    .follow-pill {
+      display: inline-block; padding: 4px 12px; border-radius: 12px;
+      font-weight: bold;
+    }
+    .follow-on  { background: #e6f8ef; color: #19a974; }
+    .follow-off { background: #f4f4f4; color: #888; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; background: white; }
+    th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 12px; }
+    th { background: #f0f0f0; position: sticky; top: 0; user-select: none; }
+    tr:hover { background: #f9f9f9; }
+    tr.ext { background: #fff8d6; }
+    tr.ext:hover { background: #fff0b3; }
+    .open-btn {
+      display: inline-block; padding: 2px 8px;
+      background: #1e6fd9; color: white; border-radius: 4px;
+      cursor: pointer; user-select: none;
+    }
+    .open-btn:hover { background: #155cb0; }
+    td.url, td.src { color: #1e6fd9; text-decoration: underline; cursor: pointer; }
+    .status-ok    { color: #19a974; }
+    .status-bad   { color: #d9534f; }
+    .status-time  { color: #c97a00; }
+    #tableWrap { max-height: 540px; overflow: auto; border: 1px solid #ddd; border-radius: 4px; }
+    .meta { font-size: 12px; color: #777; margin-left: 6px; }
+    input[type=checkbox] { margin-left: 4px; vertical-align: middle; }
+  </style>
+</head>
+<body>
+<h1>
+  Web URL Health Checker
+  <span class="meta">— 输入域名,自动爬取所有链接测健康 · QQ 496631085</span>
+</h1>
+
+<div class="row">
+  <label>域名(每行一个):</label>
+  <textarea id="domains" placeholder="example.com
+https://github.com"></textarea>
+</div>
+
+<div class="row">
+  <label>并发</label>
+  <input type="number" id="concurrency" value="20" min="1" max="200" />
+  <label>深度</label>
+  <input type="number" id="maxDepth" value="2" min="0" max="5" />
+  <label>超时(s)</label>
+  <input type="number" id="timeoutSec" value="8" min="1" max="60" step="0.5" />
+  <label>间隔(ms)</label>
+  <input type="number" id="delayMs" value="0" min="0" max="10000" step="50" title="每请求间隔,防被拉黑" />
+  <label><input type="checkbox" id="includeExternal" />外站也测</label>
+  <button id="startBtn" class="btn-start">开始</button>
+  <button id="stopBtn"  class="btn-stop"  disabled>停止</button>
+  <span id="status" class="meta">等待开始…</span>
+  <span id="follow" class="follow-pill follow-on">● 跟随新结果</span>
+</div>
+
+<div id="tableWrap">
+  <table id="tbl">
+    <thead>
+      <tr>
+        <th style="width:60px">操作</th>
+        <th style="width:120px">域名</th>
+        <th>URL</th>
+        <th>来源(发现此链接的父页)</th>
+        <th style="width:90px">状态</th>
+        <th style="width:60px">代码</th>
+        <th style="width:60px">响应(ms)</th>
+        <th style="width:80px">时间</th>
+      </tr>
+    </thead>
+    <tbody id="tb"></tbody>
+  </table>
+</div>
+
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  let rowCount = 0, okCount = 0, badCount = 0;
+
+  // === 智能滚动状态机 ===
+  const FOLLOW_THRESHOLD = 30;
+  let autoFollow = true;
+  let pendingCount = 0;
+
+  function distanceFromBottom() {
+    const el = $('tableWrap');
+    return el.scrollHeight - el.scrollTop - el.clientHeight;
+  }
+
+  function setAutoFollow(on) {
+    autoFollow = on;
+    const f = $('follow');
+    if (on) {
+      pendingCount = 0;
+      f.textContent = '● 跟随新结果';
+      f.className = 'follow-pill follow-on';
+    } else {
+      f.textContent = `○ 已停止跟随 · ${pendingCount} 条新结果待看`;
+      f.className = 'follow-pill follow-off';
+    }
+  }
+
+  let scrollTimer = null;
+  $('tableWrap').addEventListener('scroll', () => {
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      const d = distanceFromBottom();
+      setAutoFollow(d <= FOLLOW_THRESHOLD);
+    }, 200);
+  });
+
+  function maybeScroll() {
+    if (autoFollow) {
+      const el = $('tableWrap');
+      el.scrollTop = el.scrollHeight;
+    }
+  }
+
+  // === 添加一行 ===
+  function addRow(r) {
+    const tr = document.createElement('tr');
+    if (r.isExternal) tr.classList.add('ext');
+
+    // 0: 操作
+    const btn = document.createElement('td');
+    const a = document.createElement('span');
+    a.textContent = '🔗';
+    a.className = 'open-btn';
+    a.title = '在浏览器打开: ' + r.url;
+    a.addEventListener('click', () => openURL(r.url));
+    btn.appendChild(a);
+    tr.appendChild(btn);
+
+    // 1: 域名
+    tr.appendChild(textCell(r.domain));
+
+    // 2: URL(可点击)
+    const urlTd = textCell(r.url);
+    urlTd.className = 'url';
+    urlTd.title = r.isExternal ? '🌍 外站 — ' + r.url : r.url;
+    urlTd.addEventListener('click', () => openURL(r.url));
+    tr.appendChild(urlTd);
+
+    // 3: 来源(可点击)
+    const srcText = r.sourceUrl || '(站点入口)';
+    const srcTd = textCell(srcText);
+    srcTd.className = 'src';
+    if (r.sourceUrl) {
+      srcTd.title = '打开来源页面: ' + r.sourceUrl;
+      srcTd.addEventListener('click', () => openURL(r.sourceUrl));
+    } else {
+      srcTd.title = '站点入口';
+    }
+    tr.appendChild(srcTd);
+
+    // 4: 状态
+    const stTd = textCell(r.status);
+    if (r.status.startsWith('✅'))      stTd.className = 'status-ok';
+    else if (r.status.includes('timeout')) stTd.className = 'status-time';
+    else                                 stTd.className = 'status-bad';
+    tr.appendChild(stTd);
+
+    // 5: 状态码
+    tr.appendChild(textCell(r.code < 0 ? '' : String(r.code)));
+
+    // 6: 响应
+    tr.appendChild(textCell(String(r.latencyMs)));
+
+    // 7: 时间
+    tr.appendChild(textCell(r.finishedAt));
+
+    $('tb').appendChild(tr);
+    rowCount++;
+    if (r.status.startsWith('✅')) okCount++; else badCount++;
+    $('status').textContent = `已检测:${rowCount}  ✅${okCount}  ❌${badCount}`;
+  }
+
+  function textCell(txt) {
+    const td = document.createElement('td');
+    td.textContent = txt;
+    return td;
+  }
+
+  function openURL(url) {
+    // Wails v2 在 webview 里打开外部链接用 runtime.BrowserOpenURL
+    if (!window.runtime || !window.runtime.BrowserOpenURL) {
+      alert('runtime.BrowserOpenURL 不可用: ' + url);
+      return;
+    }
+    window.runtime.BrowserOpenURL(url);
+  }
+
+  // === Wails runtime 事件订阅 ===
+  // 注意:wails v2 在 webview 注入 window.runtime 但事件订阅用 EventsOn
+  function hookEvents() {
+    if (!window.runtime || !window.runtime.EventsOn) {
+      console.warn('window.runtime 还没注入,等 100ms 再试');
+      setTimeout(hookEvents, 100);
+      return;
+    }
+    window.runtime.EventsOn('result', (r) => {
+      addRow(r);
+      if (autoFollow) {
+        maybeScroll();
+      } else {
+        pendingCount++;
+        const f = $('follow');
+        f.textContent = `○ 已停止跟随 · ${pendingCount} 条新结果待看`;
+      }
+    });
+    window.runtime.EventsOn('progress', (p) => {
+      $('status').textContent = p.message;
+    });
+    window.runtime.EventsOn('finished', () => {
+      $('startBtn').disabled = false;
+      $('stopBtn').disabled  = true;
+      setAutoFollow(true);
+      $('status').textContent += ' · 已结束';
+    });
+  }
+  hookEvents();
+
+  // === 启动 / 停止 ===
+  function readDomains() {
+    return $('domains').value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  }
+  $('startBtn').addEventListener('click', async () => {
+    const domains = readDomains();
+    if (!domains.length) {
+      $('status').textContent = '请输入至少一个域名'; return;
+    }
+    // 清空表格
+    $('tb').innerHTML = '';
+    rowCount = okCount = badCount = 0;
+    setAutoFollow(true);
+
+    $('startBtn').disabled = true;
+    $('stopBtn').disabled  = false;
+    $('status').textContent = '正在爬取…';
+
+    try {
+      await window.go.main.App.Start(
+        domains,
+        parseInt($('maxDepth').value, 10),
+        parseInt($('concurrency').value, 10),
+        parseFloat($('timeoutSec').value),
+        parseInt($('delayMs').value, 10),
+        $('includeExternal').checked
+      );
+    } catch (e) {
+      $('status').textContent = '启动失败: ' + e;
+      $('startBtn').disabled = false;
+      $('stopBtn').disabled  = true;
+    }
+  });
+
+  $('stopBtn').addEventListener('click', () => {
+    if (window.go && window.go.main && window.go.main.App) {
+      window.go.main.App.Stop();
+    }
+    $('status').textContent = '正在停止…';
+  });
+})();
+</script>
+</body>
+</html>

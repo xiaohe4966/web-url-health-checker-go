@@ -1,0 +1,28 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Web URL Health Checker",
+  "outputfilename": "web-url-health-checker",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "auto",
+  "wailsjsdir": "./frontend/src",
+  "author": {
+    "name": "xiaohe4966",
+    "email": "496631085@qq.com"
+  },
+  "info": {
+    "companyName": "xiaohe4966",
+    "productName": "Web URL Health Checker",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright 2026 xiaohe4966 (QQ: 496631085)",
+    "comments": "Crawl domains, detect dead links in real-time."
+  },
+  "mac": {
+    "category": "public.app-category.developer-tools",
+    "titlebar": "hiddenInset"
+  },
+  "win": {
+    "webview2_is_installed": true
+  }
+}
