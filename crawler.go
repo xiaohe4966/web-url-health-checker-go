@@ -275,13 +275,24 @@ func (c *Crawler) runOne(ctx context.Context, base string) {
 	}
 
 	// 同站 + 外站 并行推进,直到两队列都空
-	for len(sameQ) > 0 || len(extQ) > 0 {
-		// 中止?
+	//
+	// 关键:子链接是在 goroutine 内 append 到 sameQ/extQ 的,主循环如果只读
+	// 队列长度退出,会在 base goroutine 还没把链接入队时就退出。
+	// 修复:循环里先 wg.Wait() 把当前所有活跃 goroutine 跑完,再判断队列。
+	for {
 		select {
 		case <-c.stop:
 			wg.Wait()
 			return
 		default:
+		}
+
+		// 等所有正在跑的 goroutine 写完他们发现的链接
+		wg.Wait()
+
+		// 现在队列稳定了,判断退出
+		if len(sameQ) == 0 && len(extQ) == 0 {
+			break
 		}
 
 		// 优先消费外站这一批(不递归)
@@ -297,13 +308,8 @@ func (c *Crawler) runOne(ctx context.Context, base string) {
 			it := sameQ[0]
 			sameQ = sameQ[1:]
 			tryEmit(it.url, it.source, it.depth, false)
-		} else {
-			// 同站空但外站可能还有,等闸释放
-			wg.Wait()
 		}
 	}
-
-	wg.Wait()
 }
 
 // === 工具函数 ===
